@@ -172,7 +172,7 @@ run_pitest() {
 
     # 添加其他配置
     MVN_CMD="$MVN_CMD -DthreadCount=4"
-    MVN_CMD="$MVN_CMD -DtimeoutConstant=4000"
+    MVN_CMD="$MVN_CMD -DtimeoutConstant=10000"
     MVN_CMD="$MVN_CMD -DtimeoutFactor=1.25"
     MVN_CMD="$MVN_CMD -DmaxMutationsPerClass=50"
 
