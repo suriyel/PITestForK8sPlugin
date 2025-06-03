@@ -1,5 +1,6 @@
 package com.distributed.pitest.maven;
 
+import com.distributed.pitest.service.ImageBuildService;
 import com.distributed.pitest.kubernetes.ExecutionConfig;
 import com.distributed.pitest.kubernetes.KubernetesExecutor;
 import com.distributed.pitest.kubernetes.KubernetesExecutorImpl;
@@ -34,7 +35,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
- * Maven plugin for distributed PIT mutation testing using Kubernetes with enhanced reporting
+ * Maven plugin for distributed PIT mutation testing using Kubernetes with Docker image building
  */
 @Mojo(name = "distributed-mutationCoverage",
         defaultPhase = LifecyclePhase.VERIFY,
@@ -104,7 +105,62 @@ public class DistributedPitestMojo extends AbstractMojo {
             defaultValue = "${project.build.directory}/pitest-module-data")
     private File moduleResultDirectory;
 
+    /**
+     * 是否构建Docker镜像
+     */
+    @Parameter(property = "buildDockerImage", defaultValue = "false")
+    private boolean buildDockerImage;
+
+    /**
+     * Docker镜像仓库地址
+     */
+    @Parameter(property = "dockerRegistry", defaultValue = "localhost:5000")
+    private String dockerRegistry;
+
+    /**
+     * Docker镜像名称
+     */
+    @Parameter(property = "dockerImageName", defaultValue = "distributed-pitest")
+    private String dockerImageName;
+
+    /**
+     * Docker镜像标签
+     */
+    @Parameter(property = "dockerImageTag", defaultValue = "latest")
+    private String dockerImageTag;
+
+    /**
+     * 是否推送镜像到仓库
+     */
+    @Parameter(property = "pushDockerImage", defaultValue = "false")
+    private boolean pushDockerImage;
+
+    /**
+     * Docker构建超时时间（分钟）
+     */
+    @Parameter(property = "dockerBuildTimeoutMinutes", defaultValue = "30")
+    private int dockerBuildTimeoutMinutes;
+
+    /**
+     * 是否在构建镜像后使用本地镜像执行
+     */
+    @Parameter(property = "useBuiltImage", defaultValue = "true")
+    private boolean useBuiltImage;
+
+    /**
+     * 强制重新构建镜像，忽略缓存
+     */
+    @Parameter(property = "forceImageRebuild", defaultValue = "false")
+    private boolean forceImageRebuild;
+
+    /**
+     * 镜像构建前的预检查
+     */
+    @Parameter(property = "preBuildImageCheck", defaultValue = "true")
+    private boolean preBuildImageCheck;
+
     private final ModuleResultSerializer resultSerializer = new ModuleResultSerializer();
+    private ImageBuildService imageBuildService;
 
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
@@ -117,14 +173,23 @@ public class DistributedPitestMojo extends AbstractMojo {
                 project.getArtifactId(), partitionStrategy);
 
         long startTime = System.currentTimeMillis();
+        String builtImageName = null;
 
         try {
-            // 1. 初始化组件
+            // 1. 初始化镜像构建服务
+            initializeImageBuildService();
+
+            // 2. 构建Docker镜像（如果需要）
+            if (buildDockerImage) {
+                builtImageName = buildDockerImageWithPreChecks();
+            }
+
+            // 3. 初始化组件
             ProjectPartitioner partitioner = createPartitioner();
             KubernetesExecutor executor = createExecutor();
             ResultAggregator aggregator = createAggregator();
 
-            // 2. 分区项目
+            // 4. 分区项目
             List<TestPartition> partitions = partitioner.partitionProject(project, buildConfig());
             logger.info("Project partitioned into {} parts", partitions.size());
 
@@ -133,14 +198,18 @@ public class DistributedPitestMojo extends AbstractMojo {
                 return;
             }
 
-            // 3. 执行测试（并行）
+            // 5. 验证执行环境
+            validateExecutionEnvironment(executor, builtImageName);
+
+            // 6. 执行测试（并行）
             ExecutorService executorService = Executors.newFixedThreadPool(
                     Math.min(partitions.size(), maxParallelPods));
             List<Future<ExecutionResult>> futures = new ArrayList<>();
 
             for (TestPartition partition : partitions) {
+                String finalBuiltImageName = builtImageName;
                 futures.add(executorService.submit(() ->
-                        executor.executeTests(partition, buildExecutionConfig())));
+                        executor.executeTests(partition, buildExecutionConfig(finalBuiltImageName))));
             }
 
             executorService.shutdown();
@@ -162,27 +231,27 @@ public class DistributedPitestMojo extends AbstractMojo {
                     .filter(result -> result != null)
                     .collect(Collectors.toList());
 
-            // 4. 聚合结果
+            // 7. 聚合结果
             AggregatedResult aggregatedResult = aggregator.aggregateResults(results);
             logger.info("Results aggregated. Total mutations: {}, Killed: {}, Score: {}%",
                     aggregatedResult.getTotalMutations(),
                     aggregatedResult.getKilledMutations(),
                     aggregatedResult.getMutationScore());
 
-            // 5. 生成报告
+            // 8. 生成报告
             aggregator.generateReport(aggregatedResult, outputDirectory);
             logger.info("PIT report generated at: {}", outputDirectory.getAbsolutePath());
 
-            // 6. 保存模块结果（用于聚合）
+            // 9. 保存模块结果（用于聚合）
             if (saveModuleResult) {
-                saveModuleExecutionResult(aggregatedResult, startTime);
+                saveModuleExecutionResult(aggregatedResult, startTime, builtImageName);
             }
 
-            // 7. 清理资源
+            // 10. 清理资源
             executor.cleanupResources();
             logger.info("Kubernetes resources cleaned up");
 
-            // 8. 检查执行状态
+            // 11. 检查执行状态
             if (aggregatedResult.hasErrors()) {
                 logger.warn("Execution completed with {} errors", aggregatedResult.getErrors().size());
                 for (String error : aggregatedResult.getErrors()) {
@@ -203,13 +272,236 @@ public class DistributedPitestMojo extends AbstractMojo {
     }
 
     /**
-     * 保存模块执行结果
+     * 初始化镜像构建服务
      */
-    private void saveModuleExecutionResult(AggregatedResult aggregatedResult, long startTime) {
+    private void initializeImageBuildService() {
+        logger.info("Initializing image build service");
+
+        this.imageBuildService = new ImageBuildService(
+                dockerRegistry,
+                pushDockerImage,
+                dockerBuildTimeoutMinutes
+        );
+
+        // 如果强制重建，清理缓存
+        if (forceImageRebuild) {
+            imageBuildService.clearCache();
+            logger.info("Forced image rebuild enabled, cache cleared");
+        }
+    }
+
+    /**
+     * 带预检查的Docker镜像构建
+     */
+    private String buildDockerImageWithPreChecks() throws MojoExecutionException {
+        logger.info("Building Docker image for distributed PITest execution");
+
+        try {
+            // 1. 预检查
+            if (preBuildImageCheck) {
+                performPreBuildChecks();
+            }
+
+            // 2. 构建镜像
+            String imageTag = resolveImageTag();
+            String builtImageName = imageBuildService.buildImageForProject(
+                    project, dockerImageName, imageTag, outputDirectory);
+
+            // 3. 后检查
+            performPostBuildChecks(builtImageName);
+
+            logger.info("Docker image built and verified successfully: {}", builtImageName);
+            return builtImageName;
+
+        } catch (ImageBuildService.ImageBuildException e) {
+            logger.error("Failed to build Docker image", e);
+            throw new MojoExecutionException("Docker image build failed", e);
+        }
+    }
+
+    /**
+     * 构建前检查
+     */
+    private void performPreBuildChecks() throws MojoExecutionException {
+        logger.info("Performing pre-build checks");
+
+        // 检查Docker是否可用
+        if (!isDockerAvailable()) {
+            throw new MojoExecutionException("Docker is not available or not running");
+        }
+
+        // 检查项目是否有必要的文件
+        if (!hasNecessaryProjectFiles()) {
+            throw new MojoExecutionException("Project is missing necessary files for Docker build");
+        }
+
+        // 检查磁盘空间
+        if (!hasSufficientDiskSpace()) {
+            logger.warn("Low disk space detected, image build may fail");
+        }
+
+        logger.info("Pre-build checks completed successfully");
+    }
+
+    /**
+     * 构建后检查
+     */
+    private void performPostBuildChecks(String imageName) throws MojoExecutionException {
+        logger.info("Performing post-build checks for image: {}", imageName);
+
+        // 验证镜像是否成功构建
+        if (!isImageAvailable(imageName)) {
+            throw new MojoExecutionException("Built image is not available: " + imageName);
+        }
+
+        // 测试镜像基本功能
+        if (!testImageBasicFunctionality(imageName)) {
+            throw new MojoExecutionException("Built image failed basic functionality test: " + imageName);
+        }
+
+        logger.info("Post-build checks completed successfully");
+    }
+
+    /**
+     * 解析镜像标签
+     */
+    private String resolveImageTag() {
+        String tag = dockerImageTag;
+
+        // 如果标签包含变量，进行替换
+        if (tag.contains("${project.version}")) {
+            tag = tag.replace("${project.version}", project.getVersion());
+        }
+
+        if (tag.contains("${build.number}")) {
+            String buildNumber = System.getProperty("build.number", System.getenv("BUILD_NUMBER"));
+            if (buildNumber != null) {
+                tag = tag.replace("${build.number}", buildNumber);
+            }
+        }
+
+        // 如果是SNAPSHOT版本，添加时间戳
+        if (project.getVersion().endsWith("-SNAPSHOT")) {
+            tag = tag + "-" + System.currentTimeMillis();
+        }
+
+        return tag;
+    }
+
+    /**
+     * 验证执行环境
+     */
+    private void validateExecutionEnvironment(KubernetesExecutor executor, String imageName)
+            throws MojoExecutionException {
+        logger.info("Validating execution environment");
+
+        try {
+            // 检查Kubernetes连接
+            List<io.fabric8.kubernetes.api.model.Pod> pods = executor.getActivePods();
+            logger.info("Kubernetes connection verified, found {} active pods", pods.size());
+
+            // 如果使用了自定义镜像，验证镜像可访问性
+            if (imageName != null && useBuiltImage) {
+                logger.info("Custom image will be used: {}", imageName);
+                // 这里可以添加镜像可访问性检查
+            }
+
+        } catch (Exception e) {
+            throw new MojoExecutionException("Execution environment validation failed", e);
+        }
+    }
+
+    /**
+     * 检查Docker是否可用
+     */
+    private boolean isDockerAvailable() {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("docker", "version");
+            Process process = pb.start();
+            int exitCode = process.waitFor();
+            return exitCode == 0;
+        } catch (Exception e) {
+            logger.debug("Docker availability check failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * 检查项目是否有必要的文件
+     */
+    private boolean hasNecessaryProjectFiles() {
+        // 检查pom.xml存在
+        if (project.getFile() == null || !project.getFile().exists()) {
+            return false;
+        }
+
+        // 检查源码目录存在
+        File srcDir = new File(project.getBasedir(), "src");
+        return srcDir.exists() && srcDir.isDirectory();
+    }
+
+    /**
+     * 检查磁盘空间是否足够
+     */
+    private boolean hasSufficientDiskSpace() {
+        try {
+            long freeSpace = outputDirectory.getFreeSpace();
+            long requiredSpace = 2L * 1024 * 1024 * 1024; // 2GB
+            return freeSpace > requiredSpace;
+        } catch (Exception e) {
+            logger.debug("Disk space check failed", e);
+            return true; // 如果检查失败，假设空间足够
+        }
+    }
+
+    /**
+     * 检查镜像是否可用
+     */
+    private boolean isImageAvailable(String imageName) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("docker", "inspect", imageName);
+            Process process = pb.start();
+            int exitCode = process.waitFor();
+            return exitCode == 0;
+        } catch (Exception e) {
+            logger.debug("Image availability check failed for: " + imageName, e);
+            return false;
+        }
+    }
+
+    /**
+     * 测试镜像基本功能
+     */
+    private boolean testImageBasicFunctionality(String imageName) {
+        try {
+            // 测试Java版本
+            ProcessBuilder pb = new ProcessBuilder("docker", "run", "--rm", imageName, "java", "-version");
+            Process process = pb.start();
+            int exitCode = process.waitFor();
+            if (exitCode != 0) {
+                return false;
+            }
+
+            // 测试Maven版本
+            pb = new ProcessBuilder("docker", "run", "--rm", imageName, "mvn", "-version");
+            process = pb.start();
+            exitCode = process.waitFor();
+            return exitCode == 0;
+
+        } catch (Exception e) {
+            logger.debug("Image functionality test failed for: " + imageName, e);
+            return false;
+        }
+    }
+
+    /**
+     * 保存模块执行结果（扩展版本，包含镜像信息）
+     */
+    private void saveModuleExecutionResult(AggregatedResult aggregatedResult, long startTime, String imageName) {
         try {
             long executionTime = System.currentTimeMillis() - startTime;
 
-            ModuleExecutionResult moduleResult = ModuleExecutionResult.builder()
+            ModuleExecutionResult.Builder builder = ModuleExecutionResult.builder()
                     .moduleId(generateModuleId())
                     .moduleName(project.getName())
                     .groupId(project.getGroupId())
@@ -225,8 +517,21 @@ public class DistributedPitestMojo extends AbstractMojo {
                     .addMetadata("execution.timestamp", System.currentTimeMillis())
                     .addMetadata("execution.strategy", partitionStrategy)
                     .addMetadata("k8s.namespace", namespace)
-                    .addMetadata("k8s.maxParallelPods", maxParallelPods)
-                    .build();
+                    .addMetadata("k8s.maxParallelPods", maxParallelPods);
+
+            // 添加镜像相关元数据
+            if (buildDockerImage) {
+                builder.addMetadata("docker.imageBuilt", true)
+                        .addMetadata("docker.registry", dockerRegistry)
+                        .addMetadata("docker.imageName", dockerImageName)
+                        .addMetadata("docker.imageTag", dockerImageTag);
+
+                if (imageName != null) {
+                    builder.addMetadata("docker.builtImageName", imageName);
+                }
+            }
+
+            ModuleExecutionResult moduleResult = builder.build();
 
             // 确保目录存在
             if (!moduleResultDirectory.exists()) {
@@ -321,13 +626,28 @@ public class DistributedPitestMojo extends AbstractMojo {
     }
 
     private ExecutionConfig buildExecutionConfig() {
+        return buildExecutionConfig(null);
+    }
+
+    private ExecutionConfig buildExecutionConfig(String customImageName) {
+        String effectiveBaseImage = baseImage;
+        boolean useLocal = false;
+
+        // 如果构建了镜像并且设置为使用构建的镜像
+        if (customImageName != null && useBuiltImage) {
+            effectiveBaseImage = customImageName;
+            useLocal = true;
+            logger.info("Using built Docker image: {}", effectiveBaseImage);
+        }
+
         return ExecutionConfig.builder()
                 .timeout(timeoutInSeconds)
                 .memoryLimit(podMemoryLimit)
                 .cpuLimit(podCpuLimit)
                 .pitestVersion(pitestVersion)
                 .imagePullPolicy(imagePullPolicy)
-                .baseImage(baseImage)
+                .baseImage(effectiveBaseImage)
+                .useLocalImage(useLocal)
                 .build();
     }
 }

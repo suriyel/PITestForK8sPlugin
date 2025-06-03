@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                              http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+    <!-- 本地仓库位置 -->
+    <localRepository>/root/.m2/repository</localRepository>
+
+    <!-- 是否与用户交互以获得输入 -->
+    <interactiveMode>false</interactiveMode>
+
+    <!-- 是否使用插件注册表 -->
+    <usePluginRegistry>false</usePluginRegistry>
+
+    <!-- 是否在没有网络连接时使用离线模式 -->
+    <offline>false</offline>
+
+    <!-- 镜像配置，用于加速依赖下载 -->
+    <mirrors>
+        <!-- 阿里云Maven中央仓库镜像 -->
+        <mirror>
+            <id>aliyun-maven</id>
+            <mirrorOf>central</mirrorOf>
+            <name>Aliyun Maven Repository</name>
+            <url>https://maven.aliyun.com/repository/public</url>
+        </mirror>
+    </mirrors>
+
+    <!-- 激活的配置文件 -->
+    <activeProfiles>
+        <activeProfile>default</activeProfile>
+    </activeProfiles>
+
+    <!-- 配置文件 -->
+    <profiles>
+        <profile>
+            <id>default</id>
+            <repositories>
+                <repository>
+                    <id>central</id>
+                    <name>Central Repository</name>
+                    <url>https://repo1.maven.org/maven2</url>
+                    <layout>default</layout>
+                    <snapshots>
+                        <enabled>false</enabled>
+                    </snapshots>
+                </repository>
+            </repositories>
+            <pluginRepositories>
+                <pluginRepository>
+                    <id>central</id>
+                    <name>Central Repository</name>
+                    <url>https://repo1.maven.org/maven2</url>
+                    <layout>default</layout>
+                    <snapshots>
+                        <enabled>false</enabled>
+                    </snapshots>
+                    <releases>
+                        <updatePolicy>never</updatePolicy>
+                    </releases>
+                </pluginRepository>
+            </pluginRepositories>
+        </profile>
+    </profiles>
+</settings>
