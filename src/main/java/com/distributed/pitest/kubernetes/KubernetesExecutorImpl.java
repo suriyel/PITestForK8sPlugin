@@ -297,7 +297,8 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
                 .withName("pitest")
                 .withImage(config.getBaseImage())
                 .withImagePullPolicy(config.getImagePullPolicy()) // 使用本地镜像时应为"Never"
-                .withCommand("sh", "-c", "chmod +x " + CONFIG_MOUNT_PATH + "/run-pitest.sh && " + CONFIG_MOUNT_PATH + "/run-pitest.sh")
+                //.withCommand("sh", "-c", "chmod +x " + CONFIG_MOUNT_PATH + "/run-pitest.sh && " + CONFIG_MOUNT_PATH + "/run-pitest.sh")
+                .withCommand("sh", CONFIG_MOUNT_PATH + "/run-pitest.sh")
                 .withResources(new io.fabric8.kubernetes.api.model.ResourceRequirementsBuilder()
                         .withLimits(limits)
                         .withRequests(requests)
