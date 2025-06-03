@@ -406,6 +406,14 @@ public class DistributedPitestMojo extends AbstractMojo {
                 // 这里可以添加镜像可访问性检查
             }
 
+            // 验证镜像可访问性
+            if (imageName != null && useBuiltImage && !pushDockerImage) {
+                logger.warn("Warning: Using built image without pushing to registry. " +
+                        "This may cause Pod creation failures in multi-node clusters.");
+                logger.warn("Consider setting pushDockerImage=true or ensuring the image " +
+                        "is available on all cluster nodes.");
+            }
+
         } catch (Exception e) {
             throw new MojoExecutionException("Execution environment validation failed", e);
         }
