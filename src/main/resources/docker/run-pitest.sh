@@ -78,20 +78,62 @@ prepare_config() {
 prepare_source() {
     log "Preparing project source code..."
 
-    # 如果有源码目录，复制到工作目录
-    if [ -d "$SRC_PATH" ] && [ "$(ls -A $SRC_PATH)" ]; then
-        log "Copying source code from $SRC_PATH to $WORK_DIR"
-        cp -r "$SRC_PATH"/* "$WORK_DIR"/ 2>/dev/null || true
-    else
-        log "No source code directory found or empty, working in current directory"
-        cd "$WORK_DIR"
+    # 创建工作目录
+    mkdir -p "$WORK_DIR"
+    cd "$WORK_DIR"
+
+    # 首先复制ConfigMap中的pom.xml（如果存在）
+    if [ -f "$CONFIG_PATH/pom.xml" ]; then
+        log "Copying pom.xml from ConfigMap"
+        cp "$CONFIG_PATH/pom.xml" "$WORK_DIR/pom.xml"
     fi
+
+    # 如果有源码目录，复制到工作目录
+    if [ -d "$SRC_PATH" ] && [ "$(ls -A $SRC_PATH 2>/dev/null)" ]; then
+        log "Source directory exists and is not empty"
+        log "Copying source code from $SRC_PATH to $WORK_DIR"
+
+        # 列出源码目录内容用于调试
+        log "Source directory contents:"
+        ls -la "$SRC_PATH" || true
+
+        # 复制所有内容
+        cp -r "$SRC_PATH"/* "$WORK_DIR"/ 2>/dev/null || {
+            log "Failed to copy with cp -r, trying alternative method"
+            find "$SRC_PATH" -type f -exec cp {} "$WORK_DIR"/ \; 2>/dev/null || true
+        }
+
+        # 如果源码目录中有pom.xml，优先使用它
+        if [ -f "$SRC_PATH/pom.xml" ]; then
+            log "Using pom.xml from source directory"
+            cp "$SRC_PATH/pom.xml" "$WORK_DIR/pom.xml"
+        fi
+    else
+        log "No source code directory found or empty"
+        log "SRC_PATH: $SRC_PATH"
+        if [ -d "$SRC_PATH" ]; then
+            log "Directory exists but appears empty:"
+            ls -la "$SRC_PATH" || true
+        else
+            log "Source directory does not exist"
+        fi
+    fi
+
+    # 列出工作目录内容用于调试
+    log "Work directory contents after copy:"
+    ls -la "$WORK_DIR" || true
 
     # 检查是否有pom.xml文件
     if [ ! -f "$WORK_DIR/pom.xml" ]; then
         log "No pom.xml found in work directory, creating minimal pom.xml"
         create_minimal_pom
+    else
+        log "Found pom.xml in work directory"
     fi
+
+    # 确保在正确的目录
+    cd "$WORK_DIR"
+    log "Current working directory: $(pwd)"
 }
 
 # 创建最小的pom.xml文件
