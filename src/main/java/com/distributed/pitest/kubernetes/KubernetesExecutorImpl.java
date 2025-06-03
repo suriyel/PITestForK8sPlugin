@@ -347,7 +347,7 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
     }
 
     private boolean waitForPodCompletion(String podName, int timeoutSeconds) {
-        logger.info("Waiting for pod {} to complete", podName);
+        logger.info("Waiting for pod {} to complete (timeout: {} seconds)", podName, timeoutSeconds);
 
         PodResource<Pod> podResource = kubernetesClient.pods()
                 .inNamespace(namespace)
@@ -355,6 +355,10 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
 
         long startTime = System.currentTimeMillis();
         long endTime = startTime + TimeUnit.SECONDS.toMillis(timeoutSeconds);
+
+        // 添加进度监控
+        long lastLogTime = startTime;
+        long progressInterval = 60000; // 每分钟输出一次进度
 
         while (System.currentTimeMillis() < endTime) {
             Pod pod = podResource.get();
@@ -364,18 +368,32 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
             }
 
             String phase = pod.getStatus().getPhase();
-            logger.debug("Pod {} phase: {}", podName, phase);
+
+            // 定期输出进度和Pod信息
+            long currentTime = System.currentTimeMillis();
+            if (currentTime - lastLogTime > progressInterval) {
+                long elapsed = (currentTime - startTime) / 1000;
+                long remaining = (endTime - currentTime) / 1000;
+                logger.info("Pod {} status: phase={}, elapsed={}s, remaining={}s",
+                        podName, phase, elapsed, remaining);
+
+                // 输出Pod资源使用情况
+                logPodResourceUsage(pod);
+                lastLogTime = currentTime;
+            }
 
             if ("Succeeded".equals(phase)) {
                 logger.info("Pod {} completed successfully", podName);
                 return true;
             } else if ("Failed".equals(phase)) {
                 logger.warn("Pod {} failed", podName);
+                // 输出失败原因
+                logPodFailureReason(pod);
                 return false;
             }
 
             try {
-                Thread.sleep(5000); // 5秒轮询一次
+                Thread.sleep(5000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 logger.warn("Interrupted while waiting for pod completion", e);
@@ -383,8 +401,48 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
             }
         }
 
-        logger.warn("Timeout waiting for pod {} to complete", podName);
+        logger.warn("Timeout waiting for pod {} to complete after {} seconds", podName, timeoutSeconds);
+        // 超时时输出Pod状态用于诊断
+        Pod pod = podResource.get();
+        if (pod != null) {
+            logPodTimeoutDiagnostic(pod);
+        }
         return false;
+    }
+
+    private void logPodResourceUsage(Pod pod) {
+        try {
+            // 这里可以添加资源使用情况的查询
+            logger.info("Pod {} containers status: {}",
+                    pod.getMetadata().getName(),
+                    pod.getStatus().getContainerStatuses());
+        } catch (Exception e) {
+            logger.debug("Could not get pod resource usage", e);
+        }
+    }
+
+    private void logPodFailureReason(Pod pod) {
+        try {
+            if (pod.getStatus().getContainerStatuses() != null) {
+                pod.getStatus().getContainerStatuses().forEach(status -> {
+                    if (status.getState() != null && status.getState().getTerminated() != null) {
+                        logger.error("Container {} terminated: reason={}, message={}",
+                                status.getName(),
+                                status.getState().getTerminated().getReason(),
+                                status.getState().getTerminated().getMessage());
+                    }
+                });
+            }
+        } catch (Exception e) {
+            logger.debug("Could not get pod failure reason", e);
+        }
+    }
+
+    private void logPodTimeoutDiagnostic(Pod pod) {
+        logger.warn("Pod timeout diagnostic for {}: phase={}, conditions={}",
+                pod.getMetadata().getName(),
+                pod.getStatus().getPhase(),
+                pod.getStatus().getConditions());
     }
 
     private ExecutionResult collectResults(TestPartition partition, String podName) {
