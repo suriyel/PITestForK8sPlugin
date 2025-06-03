@@ -207,22 +207,54 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
         script.append("\n");
         script.append("echo \"Starting PIT mutation testing for partition: ").append(partition.getId()).append("\"\n");
         script.append("\n");
-        script.append("# Create target classes string\n");
-        script.append("TARGET_CLASSES=$(cat ").append(CONFIG_MOUNT_PATH).append("/targetClasses.txt | tr '\\n' ',' | sed 's/,$//')\n");
-        script.append("\n");
-        script.append("# Create target tests string\n");
-        script.append("TARGET_TESTS=$(cat ").append(CONFIG_MOUNT_PATH).append("/targetTests.txt | tr '\\n' ',' | sed 's/,$//')\n");
+
+        // 添加源码复制逻辑
+        script.append("# Prepare working directory\n");
+        script.append("mkdir -p /tmp/project\n");
+        script.append("cd /tmp/project\n");
         script.append("\n");
 
-        // 添加源代码搜集逻辑
-        script.append("# Copy source code\n");
-        script.append("if [ -d \"").append(SRC_MOUNT_PATH).append("\" ]; then\n");
-        script.append("  echo \"Source code directory found, will include source in report\"\n");
+        script.append("# Copy source code if available\n");
+        script.append("if [ -d \"/tmp/project-src\" ] && [ \"$(ls -A /tmp/project-src 2>/dev/null)\" ]; then\n");
+        script.append("  echo \"Source code directory found, copying to work directory\"\n");
+        script.append("  cp -r /tmp/project-src/* /tmp/project/ 2>/dev/null || {\n");
+        script.append("    echo \"Failed to copy with cp -r, trying find method\"\n");
+        script.append("    find /tmp/project-src -type f -exec cp {} /tmp/project/ \\; 2>/dev/null || true\n");
+        script.append("  }\n");
+        script.append("  echo \"Source copy completed\"\n");
         script.append("  SRC_OPT=\"-DincludeSource=true\"\n");
         script.append("else\n");
-        script.append("  echo \"No source code directory found\"\n");
+        script.append("  echo \"No source code directory found or empty\"\n");
         script.append("  SRC_OPT=\"\"\n");
+        script.append("  # Create minimal pom.xml if none exists\n");
+        script.append("  if [ ! -f \"/tmp/project/pom.xml\" ]; then\n");
+        script.append("    echo \"Creating minimal pom.xml\"\n");
+        script.append("    cat > /tmp/project/pom.xml << 'EOF'\n");
+        script.append(createMinimalPomContent(partition));
+        script.append("EOF\n");
+        script.append("  fi\n");
         script.append("fi\n");
+        script.append("\n");
+
+        // 添加调试信息
+        script.append("# Debug information\n");
+        script.append("echo \"Current directory: $(pwd)\"\n");
+        script.append("echo \"Directory contents:\"\n");
+        script.append("ls -la /tmp/project/ || true\n");
+        script.append("echo \"POM file check:\"\n");
+        script.append("if [ -f \"/tmp/project/pom.xml\" ]; then\n");
+        script.append("  echo \"pom.xml found\"\n");
+        script.append("else\n");
+        script.append("  echo \"ERROR: pom.xml not found!\"\n");
+        script.append("  exit 1\n");
+        script.append("fi\n");
+        script.append("\n");
+
+        script.append("# Create target classes string\n");
+        script.append("TARGET_CLASSES=$(cat ").append("/tmp/pitest-config").append("/targetClasses.txt | tr '\\n' ',' | sed 's/,$//')\n");
+        script.append("\n");
+        script.append("# Create target tests string\n");
+        script.append("TARGET_TESTS=$(cat ").append("/tmp/pitest-config").append("/targetTests.txt | tr '\\n' ',' | sed 's/,$//')\n");
         script.append("\n");
 
         // 运行PIT测试
@@ -231,17 +263,61 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
         script.append("  -DtargetClasses=\"${TARGET_CLASSES}\" \\\n");
         script.append("  -DtargetTests=\"${TARGET_TESTS}\" \\\n");
         script.append("  -DoutputFormats=XML,HTML \\\n");
-        script.append("  -DreportDir=").append(RESULTS_MOUNT_PATH).append(" \\\n");
+        script.append("  -DreportDir=").append("/tmp/pitest-results").append(" \\\n");
         script.append("  -DtimestampedReports=false \\\n");
-
         script.append("  ${SRC_OPT} \\\n");
-
         script.append("  -DexcludedClasses=\"\" \\\n");
         script.append("  -DthreadCount=4\n");
         script.append("\n");
         script.append("echo \"PIT testing completed\"\n");
 
         return script.toString();
+    }
+
+    // 新增方法：创建最小POM内容
+    private String createMinimalPomContent(TestPartition partition) {
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+                "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"\n" +
+                "         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n" +
+                "         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0\n" +
+                "                             http://maven.apache.org/xsd/maven-4.0.0.xsd\">\n" +
+                "    <modelVersion>4.0.0</modelVersion>\n" +
+                "    <groupId>com.distributed.pitest</groupId>\n" +
+                "    <artifactId>mutation-testing-" + partition.getId() + "</artifactId>\n" +
+                "    <version>1.0.0</version>\n" +
+                "    <packaging>jar</packaging>\n" +
+                "    <properties>\n" +
+                "        <maven.compiler.source>8</maven.compiler.source>\n" +
+                "        <maven.compiler.target>8</maven.compiler.target>\n" +
+                "        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n" +
+                "    </properties>\n" +
+                "    <dependencies>\n" +
+                "        <dependency>\n" +
+                "            <groupId>junit</groupId>\n" +
+                "            <artifactId>junit</artifactId>\n" +
+                "            <version>4.13.2</version>\n" +
+                "            <scope>test</scope>\n" +
+                "        </dependency>\n" +
+                "    </dependencies>\n" +
+                "    <build>\n" +
+                "        <plugins>\n" +
+                "            <plugin>\n" +
+                "                <groupId>org.apache.maven.plugins</groupId>\n" +
+                "                <artifactId>maven-compiler-plugin</artifactId>\n" +
+                "                <version>3.8.1</version>\n" +
+                "                <configuration>\n" +
+                "                    <source>8</source>\n" +
+                "                    <target>8</target>\n" +
+                "                </configuration>\n" +
+                "            </plugin>\n" +
+                "            <plugin>\n" +
+                "                <groupId>org.pitest</groupId>\n" +
+                "                <artifactId>pitest-maven</artifactId>\n" +
+                "                <version>1.9.0</version>\n" +
+                "            </plugin>\n" +
+                "        </plugins>\n" +
+                "    </build>\n" +
+                "</project>\n";
     }
 
     private Pod createPod(TestPartition partition, String podName, ExecutionConfig config) {
