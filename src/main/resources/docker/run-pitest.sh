@@ -2,6 +2,7 @@
 
 # PITest分布式执行脚本
 # 此脚本在Kubernetes Pod中执行，用于运行PITest突变测试
+# 新增：支持从ConfigMap重构源码目录结构
 
 set -e
 
@@ -74,24 +75,131 @@ prepare_config() {
     fi
 }
 
-# 准备项目源码
+# 从ConfigMap重构源码目录结构（新增函数）
+reconstruct_source_structure() {
+    log "Reconstructing source code structure from ConfigMap..."
+
+    # 检查源码ConfigMap挂载点
+    if [ ! -d "$SRC_PATH" ] || [ -z "$(ls -A $SRC_PATH 2>/dev/null)" ]; then
+        log "No source ConfigMap found or empty, working without source code"
+        return 0
+    fi
+
+    # 创建工作目录
+    mkdir -p "$WORK_DIR"
+    cd "$WORK_DIR"
+
+    # 遍历ConfigMap中的所有文件
+    for configmap_file in "$SRC_PATH"/*; do
+        if [ -f "$configmap_file" ]; then
+            filename=$(basename "$configmap_file")
+
+            # 跳过路径信息文件
+            if [[ "$filename" == *.path ]]; then
+                continue
+            fi
+
+            # 检查是否有对应的路径信息文件
+            path_file="$configmap_file.path"
+            if [ -f "$path_file" ]; then
+                # 读取原始路径
+                original_path=$(cat "$path_file")
+                log "Restoring file: $filename -> $original_path"
+
+                # 创建目录结构
+                target_dir=$(dirname "$original_path")
+                mkdir -p "$target_dir"
+
+                # 复制文件到正确位置
+                cp "$configmap_file" "$original_path"
+            else
+                # 如果没有路径信息，尝试从文件名推断
+                if [[ "$filename" == "pom.xml" ]]; then
+                    log "Restoring pom.xml to project root"
+                    cp "$configmap_file" "pom.xml"
+                elif [[ "$filename" == *"src_main_java"* ]]; then
+                    # 重构Java源文件路径
+                    reconstruct_java_file "$configmap_file" "$filename" "src/main/java"
+                elif [[ "$filename" == *"src_test_java"* ]]; then
+                    # 重构Java测试文件路径
+                    reconstruct_java_file "$configmap_file" "$filename" "src/test/java"
+                elif [[ "$filename" == *"src_main_resources"* ]]; then
+                    # 重构资源文件路径
+                    reconstruct_resource_file "$configmap_file" "$filename" "src/main/resources"
+                elif [[ "$filename" == *"src_test_resources"* ]]; then
+                    # 重构测试资源文件路径
+                    reconstruct_resource_file "$configmap_file" "$filename" "src/test/resources"
+                else
+                    log "Unknown file type: $filename, placing in root directory"
+                    cp "$configmap_file" "$filename"
+                fi
+            fi
+        fi
+    done
+
+    log "Source code structure reconstruction completed"
+}
+
+# 重构Java文件（新增函数）
+reconstruct_java_file() {
+    local configmap_file="$1"
+    local filename="$2"
+    local base_path="$3"
+
+    # 从文件名中提取Java类路径
+    # 例如：src_main_java_com_example_MyClass.java -> com/example/MyClass.java
+    local java_path=$(echo "$filename" | sed "s/^${base_path//\//_}_//g")
+    java_path=$(echo "$java_path" | sed 's/_/\//g')
+
+    local target_path="$base_path/$java_path"
+    local target_dir=$(dirname "$target_path")
+
+    log "Reconstructing Java file: $filename -> $target_path"
+    mkdir -p "$target_dir"
+    cp "$configmap_file" "$target_path"
+}
+
+# 重构资源文件（新增函数）
+reconstruct_resource_file() {
+    local configmap_file="$1"
+    local filename="$2"
+    local base_path="$3"
+
+    # 从文件名中提取资源路径
+    local resource_path=$(echo "$filename" | sed "s/^${base_path//\//_}_//g")
+    resource_path=$(echo "$resource_path" | sed 's/_/\//g')
+
+    local target_path="$base_path/$resource_path"
+    local target_dir=$(dirname "$target_path")
+
+    log "Reconstructing resource file: $filename -> $target_path"
+    mkdir -p "$target_dir"
+    cp "$configmap_file" "$target_path"
+}
+
+# 准备项目源码（修改后的函数）
 prepare_source() {
     log "Preparing project source code..."
 
-    # 如果有源码目录，复制到工作目录
-    if [ -d "$SRC_PATH" ] && [ "$(ls -A $SRC_PATH)" ]; then
-        log "Copying source code from $SRC_PATH to $WORK_DIR"
-        cp -r "$SRC_PATH"/* "$WORK_DIR"/ 2>/dev/null || true
-    else
-        log "No source code directory found or empty, working in current directory"
-        cd "$WORK_DIR"
-    fi
+    # 首先尝试从ConfigMap重构源码结构
+    reconstruct_source_structure
+
+    # 确保在工作目录中
+    cd "$WORK_DIR"
 
     # 检查是否有pom.xml文件
     if [ ! -f "$WORK_DIR/pom.xml" ]; then
         log "No pom.xml found in work directory, creating minimal pom.xml"
         create_minimal_pom
+    else
+        log "Found existing pom.xml in work directory"
     fi
+
+    # 显示重构后的目录结构
+    log "Project structure after reconstruction:"
+    find "$WORK_DIR" -type f -name "*.java" -o -name "*.xml" -o -name "*.properties" | head -20 | while read file; do
+        log "  $file"
+    done
 }
 
 # 创建最小的pom.xml文件
@@ -176,9 +284,10 @@ run_pitest() {
     MVN_CMD="$MVN_CMD -DtimeoutFactor=1.25"
     MVN_CMD="$MVN_CMD -DmaxMutationsPerClass=50"
 
-    # 如果有源码，包含源码信息
-    if [ -d "$SRC_PATH" ] && [ "$(ls -A $SRC_PATH)" ]; then
+    # 如果重构了源码，包含源码信息
+    if [ -d "src" ]; then
         MVN_CMD="$MVN_CMD -DincludeSource=true"
+        log "Source code detected, enabling source inclusion"
     fi
 
     # 添加环境变量中的其他参数
@@ -216,7 +325,7 @@ run_pitest() {
     return $EXIT_CODE
 }
 
-# 清理和总结
+# 清理和总结（增强版本）
 cleanup_and_summary() {
     log "Generating execution summary..."
 
@@ -227,12 +336,21 @@ PITest Distributed Execution Summary
 Execution Time: $(date)
 Work Directory: $WORK_DIR
 Results Directory: $RESULTS_PATH
+Source Path: $SRC_PATH
 Target Classes: $TARGET_CLASSES
 Target Tests: $TARGET_TESTS
 Exit Code: $EXIT_CODE
 
+Source Structure Reconstructed:
+$(find "$WORK_DIR" -type f -name "*.java" | wc -l) Java files
+$(find "$WORK_DIR" -type f -name "*.xml" | wc -l) XML files
+$(find "$WORK_DIR" -type f -name "*.properties" | wc -l) Properties files
+
 Generated Files:
 $(ls -la "$RESULTS_PATH" 2>/dev/null || echo "No files generated")
+
+ConfigMap Source Files:
+$(ls -la "$SRC_PATH" 2>/dev/null | wc -l) files in source ConfigMap
 EOF
 
     log "Execution summary saved to $RESULTS_PATH/execution-summary.txt"
@@ -242,11 +360,17 @@ EOF
         log "Results directory contents:"
         ls -la "$RESULTS_PATH"
     fi
+
+    # 保存源码重构日志（用于调试）
+    if [ -d "$WORK_DIR" ]; then
+        find "$WORK_DIR" -type f > "$RESULTS_PATH/reconstructed-files.txt" 2>/dev/null || true
+        log "Reconstructed files list saved to $RESULTS_PATH/reconstructed-files.txt"
+    fi
 }
 
 # 主函数
 main() {
-    log "Starting PITest distributed execution in Kubernetes Pod"
+    log "Starting PITest distributed execution in Kubernetes Pod with ConfigMap source support"
     log "Pod: ${HOSTNAME:-unknown}"
     log "Java Version: $(java -version 2>&1 | head -1)"
     log "Maven Version: $(mvn -version 2>&1 | head -1)"

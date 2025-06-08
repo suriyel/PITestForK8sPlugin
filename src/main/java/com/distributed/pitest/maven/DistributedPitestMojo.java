@@ -142,12 +142,6 @@ public class DistributedPitestMojo extends AbstractMojo {
     private int dockerBuildTimeoutMinutes;
 
     /**
-     * 是否在构建镜像后使用本地镜像执行
-     */
-    @Parameter(property = "useBuiltImage", defaultValue = "true")
-    private boolean useBuiltImage;
-
-    /**
      * 强制重新构建镜像，忽略缓存
      */
     @Parameter(property = "forceImageRebuild", defaultValue = "false")
@@ -382,7 +376,7 @@ public class DistributedPitestMojo extends AbstractMojo {
 
         // 如果是SNAPSHOT版本，添加时间戳
         if (project.getVersion().endsWith("-SNAPSHOT")) {
-            tag = tag + "-" + System.currentTimeMillis();
+            //tag = tag + "-" + System.currentTimeMillis();
         }
 
         return tag;
@@ -401,13 +395,13 @@ public class DistributedPitestMojo extends AbstractMojo {
             logger.info("Kubernetes connection verified, found {} active pods", pods.size());
 
             // 如果使用了自定义镜像，验证镜像可访问性
-            if (imageName != null && useBuiltImage) {
+            if (imageName != null) {
                 logger.info("Custom image will be used: {}", imageName);
                 // 这里可以添加镜像可访问性检查
             }
 
             // 验证镜像可访问性
-            if (imageName != null && useBuiltImage && !pushDockerImage) {
+            if (imageName != null && !pushDockerImage) {
                 logger.warn("Warning: Using built image without pushing to registry. " +
                         "This may cause Pod creation failures in multi-node clusters.");
                 logger.warn("Consider setting pushDockerImage=true or ensuring the image " +
@@ -639,12 +633,10 @@ public class DistributedPitestMojo extends AbstractMojo {
 
     private ExecutionConfig buildExecutionConfig(String customImageName) {
         String effectiveBaseImage = baseImage;
-        boolean useLocal = false;
 
         // 如果构建了镜像并且设置为使用构建的镜像
-        if (customImageName != null && useBuiltImage) {
+        if (customImageName != null) {
             effectiveBaseImage = customImageName;
-            useLocal = true;
             logger.info("Using built Docker image: {}", effectiveBaseImage);
         }
 
@@ -655,7 +647,6 @@ public class DistributedPitestMojo extends AbstractMojo {
                 .pitestVersion(pitestVersion)
                 .imagePullPolicy(imagePullPolicy)
                 .baseImage(effectiveBaseImage)
-                .useLocalImage(useLocal)
                 .build();
     }
 }

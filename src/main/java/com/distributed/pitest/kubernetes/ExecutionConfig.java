@@ -10,7 +10,6 @@ public class ExecutionConfig {
     private final String pitestVersion;
     private final String imagePullPolicy;
     private final String baseImage;
-    private final boolean useLocalImage;
 
     private ExecutionConfig(Builder builder) {
         this.timeout = builder.timeout;
@@ -19,7 +18,6 @@ public class ExecutionConfig {
         this.pitestVersion = builder.pitestVersion;
         this.imagePullPolicy = builder.imagePullPolicy;
         this.baseImage = builder.baseImage;
-        this.useLocalImage = builder.useLocalImage;
     }
 
     public int getTimeout() {
@@ -46,10 +44,6 @@ public class ExecutionConfig {
         return baseImage;
     }
 
-    public boolean isUseLocalImage() {
-        return useLocalImage;
-    }
-
     public static Builder builder() {
         return new Builder();
     }
@@ -61,7 +55,6 @@ public class ExecutionConfig {
         private String pitestVersion = "1.9.0";
         private String imagePullPolicy = "IfNotPresent";
         private String baseImage = "maven:3.8.5-openjdk-8";
-        private boolean useLocalImage = false;
 
         public Builder timeout(int timeout) {
             this.timeout = timeout;
@@ -93,17 +86,7 @@ public class ExecutionConfig {
             return this;
         }
 
-        public Builder useLocalImage(boolean useLocalImage) {
-            this.useLocalImage = useLocalImage;
-            return this;
-        }
-
         public ExecutionConfig build() {
-            // 当使用本地镜像时，自动设置Never策略
-            if (useLocalImage && !"Never".equals(imagePullPolicy)) {
-                this.imagePullPolicy = "Never";
-            }
-
             return new ExecutionConfig(this);
         }
     }

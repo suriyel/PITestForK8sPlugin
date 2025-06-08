@@ -20,6 +20,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -88,9 +89,6 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
         logger.info("Starting execution of partition {} in pod {}", partition.getId(), podName);
 
         try {
-            // 1. 创建配置映射
-            createConfigMap(partition, podName);
-
             // 2. 创建并运行Pod
             Pod pod = createPod(partition, podName, config);
             activePods.put(podName, pod);
@@ -144,7 +142,7 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
                     .withLabel("executionId", executionId)
                     .delete();
 
-            // 删除所有ConfigMap
+            // 删除所有配置ConfigMap
             kubernetesClient.configMaps()
                     .inNamespace(namespace)
                     .withLabel(POD_LABEL_KEY, POD_LABEL_VALUE)
@@ -182,7 +180,7 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
         data.put("pitest.properties", propsBuilder.toString());
 
         // 创建运行脚本
-        data.put("run-pitest.sh", createRunScript(partition));
+        //data.put("run-pitest.sh", createRunScript(partition));
 
         // 创建ConfigMap
         ConfigMap configMap = new ConfigMapBuilder()
@@ -200,132 +198,190 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
         logger.info("ConfigMap {} created successfully", configMapName);
     }
 
-    private String createRunScript(TestPartition partition) {
-        StringBuilder script = new StringBuilder();
-        script.append("#!/bin/bash\n");
-        script.append("set -e\n");
-        script.append("\n");
-        script.append("echo \"Starting PIT mutation testing for partition: ").append(partition.getId()).append("\"\n");
-        script.append("\n");
+    /**
+     * 创建源码ConfigMap（新增方法）
+     */
+    private void createSourceCodeConfigMap(TestPartition partition, String podName) {
+        String sourceConfigMapName = podName + "-source";
+        logger.info("Creating source ConfigMap {} for partition {}", sourceConfigMapName, partition.getId());
 
-        // 添加源码复制逻辑
-        script.append("# Prepare working directory\n");
-        script.append("mkdir -p /tmp/project\n");
-        script.append("cd /tmp/project\n");
-        script.append("\n");
+        Map<String, String> sourceData = new HashMap<>();
 
-        script.append("# Copy source code if available\n");
-        script.append("if [ -d \"/tmp/project-src\" ] && [ \"$(ls -A /tmp/project-src 2>/dev/null)\" ]; then\n");
-        script.append("  echo \"Source code directory found, copying to work directory\"\n");
-        script.append("  cp -r /tmp/project-src/* /tmp/project/ 2>/dev/null || {\n");
-        script.append("    echo \"Failed to copy with cp -r, trying find method\"\n");
-        script.append("    find /tmp/project-src -type f -exec cp {} /tmp/project/ \\; 2>/dev/null || true\n");
-        script.append("  }\n");
-        script.append("  echo \"Source copy completed\"\n");
-        script.append("  SRC_OPT=\"-DincludeSource=true\"\n");
-        script.append("else\n");
-        script.append("  echo \"No source code directory found or empty\"\n");
-        script.append("  SRC_OPT=\"\"\n");
-        script.append("  # Create minimal pom.xml if none exists\n");
-        script.append("  if [ ! -f \"/tmp/project/pom.xml\" ]; then\n");
-        script.append("    echo \"Creating minimal pom.xml\"\n");
-        script.append("    cat > /tmp/project/pom.xml << 'EOF'\n");
-        script.append(createMinimalPomContent(partition));
-        script.append("EOF\n");
-        script.append("  fi\n");
-        script.append("fi\n");
-        script.append("\n");
+        try {
+            // 收集项目源码文件
+            collectSourceFiles(projectBaseDir, sourceData);
 
-        // 添加调试信息
-        script.append("# Debug information\n");
-        script.append("echo \"Current directory: $(pwd)\"\n");
-        script.append("echo \"Directory contents:\"\n");
-        script.append("ls -la /tmp/project/ || true\n");
-        script.append("echo \"POM file check:\"\n");
-        script.append("if [ -f \"/tmp/project/pom.xml\" ]; then\n");
-        script.append("  echo \"pom.xml found\"\n");
-        script.append("else\n");
-        script.append("  echo \"ERROR: pom.xml not found!\"\n");
-        script.append("  exit 1\n");
-        script.append("fi\n");
-        script.append("\n");
+            // 如果没有收集到源码文件，创建基本的项目结构信息
+            if (sourceData.isEmpty()) {
+                logger.warn("No source files found, creating basic project structure");
+                sourceData.put("project-info.txt", createProjectInfo(partition));
+            } else {
+                logger.info("Collected {} source files for ConfigMap", sourceData.size());
+            }
 
-        script.append("# Create target classes string\n");
-        script.append("TARGET_CLASSES=$(cat ").append("/tmp/pitest-config").append("/targetClasses.txt | tr '\\n' ',' | sed 's/,$//')\n");
-        script.append("\n");
-        script.append("# Create target tests string\n");
-        script.append("TARGET_TESTS=$(cat ").append("/tmp/pitest-config").append("/targetTests.txt | tr '\\n' ',' | sed 's/,$//')\n");
-        script.append("\n");
+            // 创建源码ConfigMap
+            ConfigMap sourceConfigMap = new ConfigMapBuilder()
+                    .withNewMetadata()
+                    .withName(sourceConfigMapName)
+                    .withNamespace(namespace)
+                    .addToLabels(POD_LABEL_KEY, POD_LABEL_VALUE)
+                    .addToLabels("executionId", executionId)
+                    .addToLabels("partitionId", partition.getId())
+                    .addToLabels("type", "source-code")
+                    .endMetadata()
+                    .withData(sourceData)
+                    .build();
 
-        // 运行PIT测试
-        script.append("# Run PIT testing\n");
-        script.append("mvn org.pitest:pitest-maven:mutationCoverage \\\n");
-        script.append("  -DtargetClasses=\"${TARGET_CLASSES}\" \\\n");
-        script.append("  -DtargetTests=\"${TARGET_TESTS}\" \\\n");
-        script.append("  -DoutputFormats=XML,HTML \\\n");
-        script.append("  -DreportDir=").append("/tmp/pitest-results").append(" \\\n");
-        script.append("  -DtimestampedReports=false \\\n");
-        script.append("  ${SRC_OPT} \\\n");
-        script.append("  -DexcludedClasses=\"\" \\\n");
-        script.append("  -DthreadCount=4\n");
-        script.append("\n");
-        script.append("echo \"PIT testing completed\"\n");
+            kubernetesClient.configMaps().inNamespace(namespace).create(sourceConfigMap);
+            logger.info("Source ConfigMap {} created successfully with {} files",
+                    sourceConfigMapName, sourceData.size());
 
-        return script.toString();
+        } catch (Exception e) {
+            logger.error("Error creating source ConfigMap for partition {}", partition.getId(), e);
+            // 不抛出异常，因为源码ConfigMap是可选的
+        }
     }
 
-    // 新增方法：创建最小POM内容
-    private String createMinimalPomContent(TestPartition partition) {
-        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-                "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"\n" +
-                "         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n" +
-                "         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0\n" +
-                "                             http://maven.apache.org/xsd/maven-4.0.0.xsd\">\n" +
-                "    <modelVersion>4.0.0</modelVersion>\n" +
-                "    <groupId>com.distributed.pitest</groupId>\n" +
-                "    <artifactId>mutation-testing-" + partition.getId() + "</artifactId>\n" +
-                "    <version>1.0.0</version>\n" +
-                "    <packaging>jar</packaging>\n" +
-                "    <properties>\n" +
-                "        <maven.compiler.source>8</maven.compiler.source>\n" +
-                "        <maven.compiler.target>8</maven.compiler.target>\n" +
-                "        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n" +
-                "    </properties>\n" +
-                "    <dependencies>\n" +
-                "        <dependency>\n" +
-                "            <groupId>junit</groupId>\n" +
-                "            <artifactId>junit</artifactId>\n" +
-                "            <version>4.13.2</version>\n" +
-                "            <scope>test</scope>\n" +
-                "        </dependency>\n" +
-                "    </dependencies>\n" +
-                "    <build>\n" +
-                "        <plugins>\n" +
-                "            <plugin>\n" +
-                "                <groupId>org.apache.maven.plugins</groupId>\n" +
-                "                <artifactId>maven-compiler-plugin</artifactId>\n" +
-                "                <version>3.8.1</version>\n" +
-                "                <configuration>\n" +
-                "                    <source>8</source>\n" +
-                "                    <target>8</target>\n" +
-                "                </configuration>\n" +
-                "            </plugin>\n" +
-                "            <plugin>\n" +
-                "                <groupId>org.pitest</groupId>\n" +
-                "                <artifactId>pitest-maven</artifactId>\n" +
-                "                <version>1.9.0</version>\n" +
-                "            </plugin>\n" +
-                "        </plugins>\n" +
-                "    </build>\n" +
-                "</project>\n";
+    /**
+     * 收集项目源码文件（新增方法）
+     */
+    private void collectSourceFiles(File projectBaseDir, Map<String, String> sourceData) {
+        if (projectBaseDir == null || !projectBaseDir.exists()) {
+            logger.warn("Project base directory not found: {}", projectBaseDir);
+            return;
+        }
+
+        try {
+            // 收集Java源文件
+            collectJavaSourceFiles(new File(projectBaseDir, "src/main/java"), "src/main/java", sourceData);
+            collectJavaSourceFiles(new File(projectBaseDir, "src/test/java"), "src/test/java", sourceData);
+
+            // 收集资源文件
+            collectResourceFiles(new File(projectBaseDir, "src/main/resources"), "src/main/resources", sourceData);
+            collectResourceFiles(new File(projectBaseDir, "src/test/resources"), "src/test/resources", sourceData);
+
+            // 收集pom.xml
+            File pomFile = new File(projectBaseDir, "pom.xml");
+            if (pomFile.exists()) {
+                try {
+                    String pomContent = new String(Files.readAllBytes(pomFile.toPath()), StandardCharsets.UTF_8);
+                    sourceData.put("pom.xml", pomContent);
+                    logger.debug("Added pom.xml to source ConfigMap");
+                } catch (IOException e) {
+                    logger.warn("Error reading pom.xml: {}", e.getMessage());
+                }
+            }
+
+        } catch (Exception e) {
+            logger.error("Error collecting source files", e);
+        }
+    }
+
+    /**
+     * 收集Java源文件（新增方法）
+     */
+    private void collectJavaSourceFiles(File sourceDir, String basePath, Map<String, String> sourceData) {
+        if (!sourceDir.exists() || !sourceDir.isDirectory()) {
+            return;
+        }
+
+        try {
+            Files.walk(sourceDir.toPath())
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.toString().endsWith(".java"))
+                    .forEach(path -> {
+                        try {
+                            String relativePath = basePath + "/" + sourceDir.toPath().relativize(path).toString();
+                            String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+
+                            // ConfigMap的key不能包含某些字符，需要转换
+                            String configMapKey = relativePath.replace("/", "_").replace("\\", "_");
+                            sourceData.put(configMapKey, content);
+
+                            // 同时保存原始路径信息
+                            sourceData.put(configMapKey + ".path", relativePath);
+
+                            logger.debug("Added source file: {} -> {}", relativePath, configMapKey);
+                        } catch (IOException e) {
+                            logger.warn("Error reading source file: {}", path, e);
+                        }
+                    });
+        } catch (IOException e) {
+            logger.warn("Error walking source directory: {}", sourceDir, e);
+        }
+    }
+
+    /**
+     * 收集资源文件（新增方法）
+     */
+    private void collectResourceFiles(File resourceDir, String basePath, Map<String, String> sourceData) {
+        if (!resourceDir.exists() || !resourceDir.isDirectory()) {
+            return;
+        }
+
+        try {
+            Files.walk(resourceDir.toPath())
+                    .filter(Files::isRegularFile)
+                    .filter(path -> {
+                        String fileName = path.getFileName().toString();
+                        // 只收集文本类型的资源文件
+                        return fileName.endsWith(".xml") || fileName.endsWith(".properties") ||
+                                fileName.endsWith(".yml") || fileName.endsWith(".yaml") ||
+                                fileName.endsWith(".txt") || fileName.endsWith(".json");
+                    })
+                    .forEach(path -> {
+                        try {
+                            String relativePath = basePath + "/" + resourceDir.toPath().relativize(path).toString();
+                            String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+
+                            String configMapKey = relativePath.replace("/", "_").replace("\\", "_");
+                            sourceData.put(configMapKey, content);
+                            sourceData.put(configMapKey + ".path", relativePath);
+
+                            logger.debug("Added resource file: {} -> {}", relativePath, configMapKey);
+                        } catch (IOException e) {
+                            logger.warn("Error reading resource file: {}", path, e);
+                        }
+                    });
+        } catch (IOException e) {
+            logger.warn("Error walking resource directory: {}", resourceDir, e);
+        }
+    }
+
+    /**
+     * 创建项目信息（新增方法）
+     */
+    private String createProjectInfo(TestPartition partition) {
+        StringBuilder info = new StringBuilder();
+        info.append("# Project Information\n");
+        info.append("Generated for partition: ").append(partition.getId()).append("\n");
+        info.append("Execution ID: ").append(executionId).append("\n");
+        info.append("Timestamp: ").append(LocalDateTime.now()).append("\n");
+        info.append("Project base directory: ").append(projectBaseDir != null ? projectBaseDir.getAbsolutePath() : "unknown").append("\n");
+        info.append("\n# Target Classes:\n");
+        for (String targetClass : partition.getTargetClasses()) {
+            info.append("- ").append(targetClass).append("\n");
+        }
+        info.append("\n# Target Tests:\n");
+        for (String targetTest : partition.getTargetTests()) {
+            info.append("- ").append(targetTest).append("\n");
+        }
+        return info.toString();
     }
 
     private Pod createPod(TestPartition partition, String podName, ExecutionConfig config) {
         String configMapName = podName + "-config";
-        logger.info("Creating Pod {} for partition {} using {}image: {}",
+        String sourceConfigMapName = podName + "-source";
+
+        logger.info("Creating Pod {} for partition {} using image: {}",
                 podName, partition.getId(),
-                config.isUseLocalImage() ? "local " : "",
                 config.getBaseImage());
+
+        // 1. 创建配置ConfigMap
+        createConfigMap(partition, podName);
+
+        // 2. 创建源码ConfigMap（新增）
+        createSourceCodeConfigMap(partition, podName);
 
         // 创建Pod构建器
         PodBuilder builder = new PodBuilder();
@@ -339,25 +395,27 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
                 .addToLabels("partitionId", partition.getId())
                 .endMetadata();
 
-        // 创建标准卷挂载
+        // 创建卷挂载
         List<io.fabric8.kubernetes.api.model.VolumeMount> volumeMounts = new ArrayList<>();
+
+        // 配置卷挂载
         volumeMounts.add(new io.fabric8.kubernetes.api.model.VolumeMountBuilder()
                 .withName(CONFIG_VOLUME_NAME)
                 .withMountPath(CONFIG_MOUNT_PATH)
                 .build());
+
+        // 结果卷挂载
         volumeMounts.add(new io.fabric8.kubernetes.api.model.VolumeMountBuilder()
                 .withName(RESULTS_VOLUME_NAME)
                 .withMountPath(RESULTS_MOUNT_PATH)
                 .build());
 
-        // 如果需要源代码，添加源代码卷挂载
-        if (projectBaseDir != null && projectBaseDir.exists()) {
-            volumeMounts.add(new io.fabric8.kubernetes.api.model.VolumeMountBuilder()
-                    .withName(SRC_VOLUME_NAME)
-                    .withMountPath(SRC_MOUNT_PATH)
-                    .withReadOnly(true)
-                    .build());
-        }
+        // 源码卷挂载（使用ConfigMap）
+        volumeMounts.add(new io.fabric8.kubernetes.api.model.VolumeMountBuilder()
+                .withName(SRC_VOLUME_NAME)
+                .withMountPath(SRC_MOUNT_PATH)
+                .withReadOnly(true)
+                .build());
 
         // 设置资源限制
         Map<String, Quantity> limits = new HashMap<>();
@@ -372,9 +430,9 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
         io.fabric8.kubernetes.api.model.Container container = new io.fabric8.kubernetes.api.model.ContainerBuilder()
                 .withName("pitest")
                 .withImage(config.getBaseImage())
-                .withImagePullPolicy(config.getImagePullPolicy()) // 使用本地镜像时应为"Never"
-                //.withCommand("sh", "-c", "chmod +x " + CONFIG_MOUNT_PATH + "/run-pitest.sh && " + CONFIG_MOUNT_PATH + "/run-pitest.sh")
-                .withCommand("sh", CONFIG_MOUNT_PATH + "/run-pitest.sh")
+                .withImagePullPolicy(config.getImagePullPolicy())
+                //.withCommand("sh", CONFIG_MOUNT_PATH + "/run-pitest.sh")
+                .withCommand("bash", "/usr/local/bin/run-pitest.sh")
                 .withResources(new io.fabric8.kubernetes.api.model.ResourceRequirementsBuilder()
                         .withLimits(limits)
                         .withRequests(requests)
@@ -385,29 +443,29 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
         // 创建卷列表
         List<io.fabric8.kubernetes.api.model.Volume> volumes = new ArrayList<>();
 
-        // 添加配置卷
+        // 配置卷（ConfigMap）
         volumes.add(new io.fabric8.kubernetes.api.model.VolumeBuilder()
                 .withName(CONFIG_VOLUME_NAME)
                 .withConfigMap(new io.fabric8.kubernetes.api.model.ConfigMapVolumeSourceBuilder()
                         .withName(configMapName)
+                        .withDefaultMode(0755) // 确保脚本可执行
                         .build())
                 .build());
 
-        // 添加结果卷
+        // 结果卷（EmptyDir - 用于Pod内部文件传输）
         volumes.add(new io.fabric8.kubernetes.api.model.VolumeBuilder()
                 .withName(RESULTS_VOLUME_NAME)
                 .withEmptyDir(new io.fabric8.kubernetes.api.model.EmptyDirVolumeSourceBuilder().build())
                 .build());
 
-        // 如果需要源代码，添加源代码卷
-        if (projectBaseDir != null && projectBaseDir.exists()) {
-            volumes.add(new io.fabric8.kubernetes.api.model.VolumeBuilder()
-                    .withName(SRC_VOLUME_NAME)
-                    .withHostPath(new io.fabric8.kubernetes.api.model.HostPathVolumeSourceBuilder()
-                            .withPath(projectBaseDir.getAbsolutePath())
-                            .build())
-                    .build());
-        }
+        // 源码卷（ConfigMap - 替代HostPath）
+        volumes.add(new io.fabric8.kubernetes.api.model.VolumeBuilder()
+                .withName(SRC_VOLUME_NAME)
+                .withConfigMap(new io.fabric8.kubernetes.api.model.ConfigMapVolumeSourceBuilder()
+                        .withName(sourceConfigMapName)
+                        .withOptional(true) // 源码ConfigMap是可选的
+                        .build())
+                .build());
 
         // 设置Pod规范
         builder.withNewSpec()
@@ -418,7 +476,7 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
 
         // 创建Pod
         Pod createdPod = kubernetesClient.pods().inNamespace(namespace).create(builder.build());
-        logger.info("Pod {} created successfully", podName);
+        logger.info("Pod {} created successfully with ConfigMap-based source mounting", podName);
 
         return createdPod;
     }
@@ -621,6 +679,7 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
 
     private void deleteResources(String podName) {
         String configMapName = podName + "-config";
+        String sourceConfigMapName = podName + "-source";
 
         try {
             logger.info("Deleting pod {}", podName);
@@ -628,6 +687,9 @@ public class KubernetesExecutorImpl implements KubernetesExecutor {
 
             logger.info("Deleting configmap {}", configMapName);
             kubernetesClient.configMaps().inNamespace(namespace).withName(configMapName).delete();
+
+            logger.info("Deleting source configmap {}", sourceConfigMapName);
+            kubernetesClient.configMaps().inNamespace(namespace).withName(sourceConfigMapName).delete();
 
         } catch (KubernetesClientException e) {
             logger.warn("Error deleting resources for pod {}", podName, e);
