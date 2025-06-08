@@ -164,6 +164,45 @@ check_dependencies() {
     log "依赖检查完成"
 }
 
+# 使用docker-compose构建
+build_with_docker_compose() {
+    log "使用docker-compose构建镜像..."
+
+    # 设置docker-compose需要的环境变量
+    export DOCKER_REGISTRY
+    export IMAGE_TAG
+    export MAVEN_VERSION
+    export PITEST_VERSION
+    export JAVA_VERSION="8"
+
+    # 构建docker-compose命令
+    local compose_cmd="docker-compose"
+
+    # 如果不使用缓存
+    if [ "$NO_CACHE" = "true" ]; then
+        compose_cmd="$compose_cmd build --no-cache"
+    else
+        compose_cmd="$compose_cmd build"
+    fi
+
+    # 指定服务名
+    compose_cmd="$compose_cmd pitest-runner"
+
+    log "执行构建命令: $compose_cmd"
+    log "环境变量: DOCKER_REGISTRY=$DOCKER_REGISTRY, IMAGE_TAG=$IMAGE_TAG"
+
+    # 执行构建
+    if eval "$compose_cmd"; then
+        log "docker-compose镜像构建成功: $FULL_IMAGE_NAME"
+
+        # 确保镜像有正确的标签
+        docker tag "${DOCKER_REGISTRY}/distributed-pitest:${IMAGE_TAG}" "$FULL_IMAGE_NAME" 2>/dev/null || true
+    else
+        error "docker-compose镜像构建失败"
+        exit 1
+    fi
+}
+
 # 显示构建信息
 show_build_info() {
     log "构建信息:"
@@ -181,35 +220,8 @@ show_build_info() {
 
 # 构建Docker镜像
 build_image() {
-    log "开始构建Docker镜像..."
-
-    # 构建Docker命令
-    local build_cmd="docker build"
-
-    # 添加构建参数
-    build_cmd="$build_cmd --build-arg MAVEN_VERSION=$MAVEN_VERSION"
-    build_cmd="$build_cmd --build-arg PITEST_VERSION=$PITEST_VERSION"
-
-    # 添加标签
-    build_cmd="$build_cmd -t $FULL_IMAGE_NAME"
-
-    # 如果不使用缓存
-    if [ "$NO_CACHE" = "true" ]; then
-        build_cmd="$build_cmd --no-cache"
-    fi
-
-    # 添加Dockerfile和上下文
-    build_cmd="$build_cmd -f $DOCKERFILE $BUILD_CONTEXT"
-
-    log "执行构建命令: $build_cmd"
-
-    # 执行构建
-    if eval "$build_cmd"; then
-        log "镜像构建成功: $FULL_IMAGE_NAME"
-    else
-        error "镜像构建失败"
-        exit 1
-    fi
+      log "开始构建Docker镜像..."
+      build_with_docker_compose
 }
 
 # 测试镜像

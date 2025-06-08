@@ -10,7 +10,7 @@ services:
         MAVEN_VERSION: ${MAVEN_VERSION:-3.8.5}
         PITEST_VERSION: ${PITEST_VERSION:-1.9.0}
         JAVA_VERSION: ${JAVA_VERSION:-8}
-    image: ${DOCKER_REGISTRY:-localhost:5000}/distributed-pitest:${IMAGE_TAG:-latest}
+    image: ${DOCKER_REGISTRY:-localhost:5000}/${IMAGE_NAME:-distributed-pitest}:${IMAGE_TAG:-latest}
     container_name: pitest-runner-build
 
     # 构建时的环境变量
@@ -40,9 +40,3 @@ networks:
   pitest-network:
     driver: bridge
     name: pitest-network
-
-# 卷定义（如果需要持久化存储）
-volumes:
-  maven-cache:
-    driver: local
-    name: pitest-maven-cache

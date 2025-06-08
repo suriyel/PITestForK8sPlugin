@@ -382,7 +382,7 @@ public class DistributedPitestMojo extends AbstractMojo {
 
         // 如果是SNAPSHOT版本，添加时间戳
         if (project.getVersion().endsWith("-SNAPSHOT")) {
-            //tag = tag + "-" + System.currentTimeMillis();
+            tag = tag + "-" + System.currentTimeMillis();
         }
 
         return tag;
